@@ -16,28 +16,25 @@ if (!in_array($cab_type, $allowed_types)) $cab_type = '';
 $rows  = [];
 $stats = null;
 
-function ensureVehicleNoColumn($con) {
-  $check = $con->query("SHOW COLUMNS FROM cab_bookings LIKE 'vehicle_no'");
-  if ($check && $check->num_rows === 0) {
-    $con->query("ALTER TABLE cab_bookings ADD COLUMN vehicle_no VARCHAR(20) NOT NULL DEFAULT 'KL-00-AA-0000' AFTER cab_type");
-  }
-}
+require_once __DIR__ . '/cab_booking_helpers.php';
 
 if (empty($errors)) {
     $con = new mysqli('localhost', 'root', '', 'cabdb');
     if (!$con->connect_error) {
-    ensureVehicleNoColumn($con);
+  ensureCabBookingTables($con);
         // Build query with optional cab_type filter — using prepared statements
         if ($cab_type) {
+      $tableName = cabBookingTableForType($cab_type);
             $stmt = $con->prepare(
-                "SELECT * FROM cab_bookings
-                 WHERE LOWER(source)=LOWER(?) AND LOWER(dest)=LOWER(?) AND cab_type=?
-                 ORDER BY booked_at DESC"
+        "SELECT * FROM " . cabBookingTableSql($tableName) . "
+         WHERE LOWER(source)=LOWER(?) AND LOWER(dest)=LOWER(?)
+         ORDER BY booked_at DESC"
             );
-            $stmt->bind_param('sss', $source, $dest, $cab_type);
+            $stmt->bind_param('ss', $source, $dest);
         } else {
+      $unionSql = cabBookingUnionSelectSql();
             $stmt = $con->prepare(
-                "SELECT * FROM cab_bookings
+        "SELECT * FROM ($unionSql) AS cab_bookings
                  WHERE LOWER(source)=LOWER(?) AND LOWER(dest)=LOWER(?)
                  ORDER BY booked_at DESC"
             );

@@ -8,6 +8,8 @@ define('DB_USER', 'root');
 define('DB_PASS', '');        // Change to your MySQL password if set
 define('DB_NAME', 'cabdb');
 
+require_once __DIR__ . '/cab_booking_helpers.php';
+
 // ── Collect & sanitise inputs ──────────────────────────────────────────────
 $pname       = trim($_POST['pname']       ?? '');
 $phone       = trim($_POST['phone']       ?? '');
@@ -65,10 +67,7 @@ function generateVehicleNo() {
 }
 
 function ensureVehicleNoColumn($con) {
-  $check = $con->query("SHOW COLUMNS FROM cab_bookings LIKE 'vehicle_no'");
-  if ($check && $check->num_rows === 0) {
-    $con->query("ALTER TABLE cab_bookings ADD COLUMN vehicle_no VARCHAR(20) NOT NULL DEFAULT 'KL-00-AA-0000' AFTER cab_type");
-  }
+  return true;
 }
 
 // ── If validation errors, show error page immediately ─────────────────────
@@ -84,33 +83,45 @@ if ($con->connect_error) {
     exit;
 }
 
-// ── Create table if not exists ─────────────────────────────────────────────
-$con->query("CREATE TABLE IF NOT EXISTS cab_bookings (
-    id          INT AUTO_INCREMENT PRIMARY KEY,
-    pname       VARCHAR(100) NOT NULL,
-    phone       VARCHAR(15)  NOT NULL,
-    source      VARCHAR(100) NOT NULL,
-    dest        VARCHAR(100) NOT NULL,
-    distance    FLOAT        NOT NULL,
-    cab_type    VARCHAR(20)  NOT NULL,
-    vehicle_no  VARCHAR(20)  NOT NULL,
-    rate_per_km INT          NOT NULL,
-    total_fare  FLOAT        NOT NULL,
-    booked_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)");
-  ensureVehicleNoColumn($con);
+// ── Create per-vehicle tables if not exists ───────────────────────────────
+ensureCabBookingTables($con);
 
   $vehicle_no = generateVehicleNo();
+  $tableName = cabBookingTableForType($cab_type);
+
+  if (!$tableName) {
+      renderPage(false, null, ["Unsupported cab type selected."], compact('pname','phone','source','dest','distance','cab_type','rate_per_km','fare'));
+      $con->close();
+      exit;
+  }
 
 // ── Prepared statement insert (prevents SQL injection) ─────────────────────
+$con->begin_transaction();
+
 $stmt = $con->prepare(
-    "INSERT INTO cab_bookings (pname, phone, source, dest, distance, cab_type, rate_per_km, vehicle_no, total_fare)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+  "INSERT INTO " . cabBookingTableSql($tableName) . " (pname, phone, source, dest, distance, cab_type, rate_per_km, vehicle_no, total_fare)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
 );
   $stmt->bind_param('ssssdsisd', $pname, $phone, $source, $dest, $distance, $cab_type, $rate_per_km, $vehicle_no, $fare);
 $ok = $stmt->execute();
 $booking_id = $con->insert_id;
 $stmt->close();
+
+if ($ok) {
+  $mainStmt = $con->prepare(
+    "INSERT INTO `cab_bookings` (pname, phone, source, dest, distance, cab_type, rate_per_km, vehicle_no, total_fare)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+  );
+  $mainStmt->bind_param('ssssdsisd', $pname, $phone, $source, $dest, $distance, $cab_type, $rate_per_km, $vehicle_no, $fare);
+  $ok = $mainStmt->execute();
+  $mainStmt->close();
+}
+
+if ($ok) {
+  $con->commit();
+} else {
+  $con->rollback();
+}
 $con->close();
 
   renderPage($ok, $booking_id, [], compact('pname','phone','source','dest','distance','cab_type','rate_per_km','vehicle_no','fare'));

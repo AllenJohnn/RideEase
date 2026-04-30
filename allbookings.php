@@ -6,48 +6,44 @@ $allowed_types = ['Auto', 'Mini', 'Sedan', 'SUV'];
 $filter = trim($_GET['filter'] ?? '');
 if (!in_array($filter, $allowed_types)) $filter = ''; // whitelist only
 
+$allRows = [];
 $con = new mysqli('localhost', 'root', '', 'cabdb');
 $rows = [];
 $stats = ['cnt'=>0,'total'=>0,'avg'=>0,'avgrate'=>0];
 
-function ensureVehicleNoColumn($con) {
-  $check = $con->query("SHOW COLUMNS FROM cab_bookings LIKE 'vehicle_no'");
-  if ($check && $check->num_rows === 0) {
-    $con->query("ALTER TABLE cab_bookings ADD COLUMN vehicle_no VARCHAR(20) NOT NULL DEFAULT 'KL-00-AA-0000' AFTER cab_type");
-  }
-}
+require_once __DIR__ . '/cab_booking_helpers.php';
 
 if (!$con->connect_error) {
-    // Auto-create table (safety net for fresh installs)
-    $con->query("CREATE TABLE IF NOT EXISTS cab_bookings (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        pname VARCHAR(100) NOT NULL, phone VARCHAR(15) NOT NULL,
-        source VARCHAR(100) NOT NULL, dest VARCHAR(100) NOT NULL,
-        distance FLOAT NOT NULL, cab_type VARCHAR(20) NOT NULL,
-    rate_per_km INT NOT NULL, vehicle_no VARCHAR(20) NOT NULL,
-    total_fare FLOAT NOT NULL,
-        booked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )");
-  ensureVehicleNoColumn($con);
+  // Auto-create per-vehicle tables (safety net for fresh installs)
+  ensureCabBookingTables($con);
+
+  $unionSql = cabBookingUnionSelectSql();
+
+  $allResult = $con->query($unionSql . " ORDER BY booked_at DESC");
+  while ($row = $allResult->fetch_assoc()) $allRows[] = $row;
+
+  $totalFare = array_sum(array_column($allRows, 'total_fare'));
+  $avgFare = count($allRows) ? $totalFare / count($allRows) : 0;
+  $avgRate = count($allRows) ? array_sum(array_column($allRows, 'rate_per_km')) / count($allRows) : 0;
+  $stats = [
+    'cnt' => count($allRows),
+    'total' => $totalFare,
+    'avg' => $avgFare,
+    'avgrate' => $avgRate,
+  ];
 
     // Fetch filtered rows — cab_type comes from a whitelist so safe to interpolate
-    // but use prepared stmt anyway for consistency
+  // but keep the SQL local to the selected vehicle tables.
     if ($filter) {
-        $stmt = $con->prepare("SELECT * FROM cab_bookings WHERE cab_type=? ORDER BY booked_at DESC");
-        $stmt->bind_param('s', $filter);
+    $tableName = cabBookingTableForType($filter);
+    $stmt = $con->prepare("SELECT * FROM " . cabBookingTableSql($tableName) . " ORDER BY booked_at DESC");
     } else {
-        $stmt = $con->prepare("SELECT * FROM cab_bookings ORDER BY booked_at DESC");
+    $stmt = $con->prepare("SELECT * FROM ($unionSql) AS cab_bookings ORDER BY booked_at DESC");
     }
     $stmt->execute();
     $result = $stmt->get_result();
     while ($row = $result->fetch_assoc()) $rows[] = $row;
     $stmt->close();
-
-    // Global stats (always across all bookings, ignoring filter)
-    $s = $con->query("SELECT COUNT(*) as cnt, COALESCE(SUM(total_fare),0) as total,
-                             COALESCE(AVG(total_fare),0) as avg, COALESCE(AVG(rate_per_km),0) as avgrate
-                      FROM cab_bookings")->fetch_assoc();
-    $stats = $s;
     $con->close();
 }
 ?>
